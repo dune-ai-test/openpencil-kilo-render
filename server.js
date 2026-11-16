@@ -58,11 +58,16 @@ createServer(async (req, res) => {
     if (req.headers['content-type']) headers['content-type'] = req.headers['content-type']
     if (req.headers.authorization) headers.authorization = req.headers.authorization
     try {
+      // Buffer the incoming body: Node's IncomingMessage is not reliably sent as a
+      // fetch() body by undici, which made upstream see an empty JSON body (HTTP 400).
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      const body = Buffer.concat(chunks)
       const target = UPSTREAM + url.pathname.slice('/kilo'.length) + url.search
       const upstream = await fetch(target, {
         method: req.method,
         headers,
-        body: req.method === 'GET' || req.method === 'HEAD' ? undefined : req.body
+        body: req.method === 'GET' || req.method === 'HEAD' ? undefined : body
       })
       res.writeHead(upstream.status, {
         ...CORS,
