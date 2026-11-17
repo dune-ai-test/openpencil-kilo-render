@@ -37,6 +37,15 @@ const CORS = {
   'access-control-allow-methods': 'POST, OPTIONS'
 }
 
+// In-memory request log (no keys or prompt text). GET /api/logs reads it.
+const logs = []
+function log(event) {
+  const entry = { at: new Date().toISOString(), ...event }
+  logs.push(entry)
+  if (logs.length > 50) logs.shift()
+  console.log(JSON.stringify(entry))
+}
+
 // Neon-backed state store for chat history + editor/model settings.
 // API keys and credentials are NEVER sent here — they stay in browser storage.
 const pool = process.env.DATABASE_URL
@@ -63,6 +72,16 @@ createServer(async (req, res) => {
   if (url.pathname === '/ready') {
     res.writeHead(200, { 'content-type': 'text/plain' })
     return res.end('ok')
+  }
+
+  if (url.pathname === '/api/logs') {
+    const expectedOrigin = `https://${req.headers.host || ''}`
+    if (req.headers.origin && req.headers.origin !== expectedOrigin) {
+      res.writeHead(403)
+      return res.end('forbidden')
+    }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    return res.end(JSON.stringify(logs))
   }
 
   // Same-origin state sync: chat history + settings (no credentials).
@@ -123,19 +142,48 @@ createServer(async (req, res) => {
       const chunks = []
       for await (const chunk of req) chunks.push(chunk)
       const body = Buffer.concat(chunks)
+      let meta = { bytes: body.length }
+      try {
+        const parsed = JSON.parse(body.toString('utf8'))
+        meta = {
+          ...meta,
+          model: parsed.model,
+          stream: parsed.stream,
+          messages: Array.isArray(parsed.messages) ? parsed.messages.length : null,
+          tools: Array.isArray(parsed.tools) ? parsed.tools.length : null
+        }
+      } catch {
+        meta = { ...meta, parseError: true }
+      }
       const target = UPSTREAM + url.pathname.slice('/kilo'.length) + url.search
+      const started = Date.now()
       const upstream = await fetch(target, {
         method: req.method,
         headers,
         body: req.method === 'GET' || req.method === 'HEAD' ? undefined : body
       })
-      res.writeHead(upstream.status, {
-        ...CORS,
-        'content-type': upstream.headers.get('content-type') || 'application/json'
+      const contentType = upstream.headers.get('content-type') || 'application/json'
+      log({
+        kind: 'kilo',
+        path: url.pathname,
+        ...meta,
+        status: upstream.status,
+        contentType,
+        ms: Date.now() - started
       })
+      if (!upstream.ok) {
+        try {
+          const text = await upstream.clone().text()
+          log({ kind: 'kilo-error', status: upstream.status, detail: text.slice(0, 500) })
+        } catch {
+          // response body may already be consumed
+        }
+      }
+      res.writeHead(upstream.status, { ...CORS, 'content-type': contentType })
       if (upstream.body) Readable.fromWeb(upstream.body).pipe(res)
       else res.end()
     } catch (error) {
+      log({ kind: 'proxy-error', path: url.pathname, detail: String(error) })
       res.writeHead(502, CORS)
       res.end(JSON.stringify({ error: String(error) }))
     }
