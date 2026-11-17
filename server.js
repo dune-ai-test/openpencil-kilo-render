@@ -6,7 +6,9 @@ import { promises as fs } from 'node:fs'
 import { extname, join, normalize } from 'node:path'
 import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
+import pg from 'pg'
 
+const { Pool } = pg
 const ROOT = fileURLToPath(new URL('./', import.meta.url))
 const DIST = join(ROOT, 'dist')
 const UPSTREAM = 'https://ai-gateway.kilo.ai/api/v1'
@@ -35,6 +37,21 @@ const CORS = {
   'access-control-allow-methods': 'POST, OPTIONS'
 }
 
+// Neon-backed state store for chat history + editor/model settings.
+// API keys and credentials are NEVER sent here — they stay in browser storage.
+const pool = process.env.DATABASE_URL
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false },
+      max: 2
+    })
+  : null
+if (pool) {
+  await pool.query(
+    'CREATE TABLE IF NOT EXISTS app_state (id text PRIMARY KEY, data jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now())'
+  )
+}
+
 function sendIndex(res) {
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
   createReadStream(join(DIST, 'index.html')).pipe(res)
@@ -46,6 +63,49 @@ createServer(async (req, res) => {
   if (url.pathname === '/ready') {
     res.writeHead(200, { 'content-type': 'text/plain' })
     return res.end('ok')
+  }
+
+  // Same-origin state sync: chat history + settings (no credentials).
+  if (url.pathname === '/api/state') {
+    const expectedOrigin = `https://${req.headers.host || ''}`
+    if (req.headers.origin && req.headers.origin !== expectedOrigin) {
+      res.writeHead(403)
+      return res.end('forbidden')
+    }
+    if (!pool) {
+      res.writeHead(503, { 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ error: 'DATABASE_URL not configured' }))
+    }
+    if (req.method === 'GET') {
+      try {
+        const { rows } = await pool.query('SELECT data FROM app_state WHERE id = $1', ['default'])
+        res.writeHead(200, { 'content-type': 'application/json' })
+        return res.end(JSON.stringify(rows[0]?.data ?? null))
+      } catch (error) {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ error: String(error) }))
+      }
+    }
+    if (req.method === 'POST') {
+      try {
+        const chunks = []
+        for await (const chunk of req) chunks.push(chunk)
+        const data = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('invalid state')
+        await pool.query(
+          `INSERT INTO app_state (id, data, updated_at) VALUES ('default', $1::jsonb, now())
+           ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
+          [JSON.stringify(data)]
+        )
+        res.writeHead(200, { 'content-type': 'application/json' })
+        return res.end('{"ok":true}')
+      } catch (error) {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ error: String(error) }))
+      }
+    }
+    res.writeHead(405)
+    return res.end()
   }
 
   // Kilo proxy — same origin as the editor.

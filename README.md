@@ -15,11 +15,17 @@ Kilo server-side. Same origin = no CORS.
 3. Runtime: **Node** (Render reads `engines.node >= 22`).
 4. **Build Command:**
    ```
+   npm install
    git clone --depth 1 --branch site https://github.com/dune-ai-test/dune-ai-test.github.io.git dist
    ```
 5. **Start Command:** `node server.js`
-6. Plan: **Free**. Health Check Path: `/ready`.
-7. Create. You get `https://<name>.onrender.com`.
+6. **Environment:** `DATABASE_URL` = your Neon **pooled** connection string.
+7. Plan: **Free**. Health Check Path: `/ready`.
+8. Create. You get `https://<name>.onrender.com`.
+
+The server creates an `app_state` table in Neon on startup. `/api/state`
+(GET/POST) stores chat history + editor/model settings as one JSON document.
+No API keys or credentials are ever sent to it.
 
 ## Configure the editor
 - Open the service URL, press Ctrl+J, Settings -> Models -> Add, choose OpenAI-compatible:
