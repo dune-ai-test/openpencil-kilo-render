@@ -180,8 +180,24 @@ createServer(async (req, res) => {
         }
       }
       res.writeHead(upstream.status, { ...CORS, 'content-type': contentType })
-      if (upstream.body) Readable.fromWeb(upstream.body).pipe(res)
-      else res.end()
+      if (upstream.body) {
+        let responseBytes = 0
+        const counter = new TransformStream({
+          transform(chunk, controller) {
+            responseBytes += chunk.byteLength
+            controller.enqueue(chunk)
+          },
+          flush() {
+            log({
+              kind: 'kilo-stream',
+              status: upstream.status,
+              bytes: responseBytes,
+              ms: Date.now() - started
+            })
+          }
+        })
+        Readable.fromWeb(upstream.body.pipeThrough(counter)).pipe(res)
+      } else res.end()
     } catch (error) {
       log({ kind: 'proxy-error', path: url.pathname, detail: String(error) })
       res.writeHead(502, CORS)
